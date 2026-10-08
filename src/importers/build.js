@@ -15,7 +15,7 @@ const GROUND_COLOR = '#424b43', POWER_COLOR = '#dc6a52';
 const PALETTE = ['#d5a143', '#78977b', '#687b8d', '#9f85b6'];
 const LED_HEX = Object.fromEntries(Object.entries(LED_COLORS).map(([hex, name]) => [name, hex]));
 
-const snap = (v, grid) => Math.round(v / grid) * grid;
+const snap = (v, grid) => Math.round(v / grid) * grid || 0; // never -0
 const finite = Number.isFinite;
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { PARTS, SCHEMATIC_GRID, partBox } from '../parts.js';
+import { PARTS, SCHEMATIC_GRID, partBox, pinPosition } from '../parts.js';
 import { validProject } from '../project.js';
 import { initialProject } from '../circuit.js';
 import { importDiagram, detectFormat, decodeText, ImportError, ACCEPTED_EXTENSIONS } from './index.js';
@@ -38,8 +38,8 @@ const nets = list => list.map(n => n.split(' ').sort().join(' ')).sort();
 function assertLayout(project) {
   assert.ok(validProject(project), 'project is valid');
   for (const c of project.components) {
-    assert.equal(c.schematic.x % SCHEMATIC_GRID, 0, `${c.ref} schematic x on grid`);
-    assert.equal(c.schematic.y % SCHEMATIC_GRID, 0, `${c.ref} schematic y on grid`);
+    assert.equal(Math.abs(c.schematic.x % SCHEMATIC_GRID), 0, `${c.ref} schematic x on grid`);
+    assert.equal(Math.abs(c.schematic.y % SCHEMATIC_GRID), 0, `${c.ref} schematic y on grid`);
     assert.ok([0, 90, 180, 270].includes(c.schematic.rotation), `${c.ref} rotation`);
     assert.ok(!c.id.includes(':'), 'ids have no colons');
   }
@@ -52,6 +52,28 @@ function assertLayout(project) {
   }
 }
 const byRef = (project, ref) => project.components.find(c => c.ref === ref);
+
+/** Groups of pins joined by explicit wires only (ground parts are NOT joined). */
+function wiredGroups(project) {
+  const parent = new Map();
+  const find = k => { if (!parent.has(k)) parent.set(k, k); while (parent.get(k) !== k) k = parent.get(k); return k; };
+  for (const w of project.wires) { const a = find(w.from), b = find(w.to); if (a !== b) parent.set(b, a); }
+  const groups = new Map();
+  for (const c of project.components) PARTS[c.type].pins.forEach((_, i) => {
+    const r = find(`${c.id}:${i}`);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(`${c.id}:${i}`);
+  });
+  return [...groups.values()];
+}
+
+/** Ground symbols are never wired to each other; each wired group holds at most one. */
+function assertGroundClusters(project) {
+  const grounds = new Set(project.components.filter(c => c.type === 'ground').map(c => `${c.id}:0`));
+  for (const w of project.wires) assert.ok(!(grounds.has(w.from) && grounds.has(w.to)), `wire ${w.id} joins two ground symbols`);
+  for (const group of wiredGroups(project)) assert.ok(group.filter(k => grounds.has(k)).length <= 1, `one ground per wired cluster: ${group}`);
+  for (const g of grounds) assert.ok(project.wires.some(w => w.from === g || w.to === g), `${g} is wired to something`);
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -95,6 +117,12 @@ test('LTspice schematic: voltage source, rotated resistor, LED and two ground fl
   assert.deepEqual(netlist(p), nets(['R1.1 V1.0', 'D1.0 R1.0', 'D1.1 GND V1.1']));
   assert.ok([0, 180].includes(byRef(p, 'R1').schematic.rotation), 'rotated resistor is horizontal');
   assert.equal(p.name, 'led-circuit');
+  // Each ground flag keeps its own pin: no wire runs from V1's ground across to D1's.
+  assertGroundClusters(p);
+  assert.equal(p.wires.length, 4);
+  const groups = wiredGroups(p).map(g => g.sort().join(' '));
+  assert.ok(groups.includes(['v1:1', `${byRef(p, 'GND1').id}:0`].sort().join(' ')) || groups.includes(['v1:1', `${byRef(p, 'GND2').id}:0`].sort().join(' ')));
+  assert.ok(groups.some(g => g.includes('d1:1') && g.includes('gnd')) && !groups.some(g => g.includes('d1:1') && g.includes('v1:1')));
 });
 
 test('LTspice files saved as UTF-16LE (with or without BOM) import the same', () => {
@@ -119,7 +147,7 @@ test('SPICE netlist: transistor switch with .model lines, continuations and comm
   assertLayout(r.project);
   const p = r.project;
   assert.equal(p.name, 'Transistor LED switch');
-  assert.deepEqual(p.components.map(c => `${c.ref}:${c.type}`).sort(), ['D1:led', 'GND1:ground', 'Q1:npn', 'RB:resistor', 'RC:resistor', 'V1:supply']);
+  assert.deepEqual(p.components.map(c => `${c.ref}:${c.type}`).sort(), ['D1:led', 'GND1:ground', 'GND2:ground', 'Q1:npn', 'RB:resistor', 'RC:resistor', 'V1:supply']);
   assert.equal(byRef(p, 'V1').value, 9);
   assert.equal(byRef(p, 'RB').value, 10000);
   assert.equal(byRef(p, 'RC').value, 330);
@@ -132,11 +160,30 @@ test('SPICE netlist: transistor switch with .model lines, continuations and comm
     'D1.0 RC.1', // LED anode
     'GND Q1.2 V1.1', // node 0
   ]));
-  // Auto-layout: the source sits left of everything and is drawn vertically.
-  const v1 = byRef(p, 'V1');
+  // Auto-layout: the classic drawing. V1 stands on the left, + up.
+  const v1 = byRef(p, 'V1'), q1 = byRef(p, 'Q1'), rc = byRef(p, 'RC'), d1 = byRef(p, 'D1'), rb = byRef(p, 'RB');
   for (const c of p.components) if (c.type !== 'ground' && c !== v1) assert.ok(c.schematic.x > v1.schematic.x, `${c.ref} is right of the source`);
   assert.equal(v1.schematic.rotation, 0);
-  assert.equal(p.components.filter(c => c.type === 'ground').length, 1, 'one ground per SPICE import');
+  const pin = (c, i) => pinPosition(c, i, 'schematic');
+  // Q1: base on the left, collector up, emitter down.
+  assert.equal(q1.schematic.rotation, 0);
+  assert.ok(pin(q1, 1).x < q1.schematic.x && pin(q1, 0).y < pin(q1, 2).y);
+  // RC then D1 in a vertical column above the collector.
+  for (const c of [rc, d1]) {
+    assert.ok([90, 270].includes(c.schematic.rotation), `${c.ref} is vertical`);
+    assert.equal(c.schematic.x, pin(q1, 0).x, `${c.ref} is in the collector's column`);
+  }
+  assert.ok(rc.schematic.y < d1.schematic.y && d1.schematic.y < q1.schematic.y);
+  assert.ok(pin(d1, 0).y < pin(d1, 1).y, 'the LED points down towards the collector');
+  // RB lies horizontally on the base's row, to its left.
+  assert.ok([0, 180].includes(rb.schematic.rotation));
+  assert.equal(rb.schematic.y, pin(q1, 1).y);
+  assert.ok(Math.max(pin(rb, 0).x, pin(rb, 1).x) < pin(q1, 1).x);
+  // One ground per cluster: directly under the source and under the emitter.
+  const grounds = p.components.filter(c => c.type === 'ground');
+  assert.deepEqual(grounds.map(g => pin(g, 0).x).sort((a, b) => a - b), [pin(v1, 1).x, pin(q1, 2).x].sort((a, b) => a - b));
+  for (const g of grounds) assert.ok([pin(v1, 1), pin(q1, 2)].some(t => t.x === pin(g, 0).x && pin(g, 0).y > t.y), 'ground sits below its pin');
+  assertGroundClusters(p);
 });
 
 test('KiCad netlist export: components and nets with auto-layout', () => {
@@ -146,9 +193,13 @@ test('KiCad netlist export: components and nets with auto-layout', () => {
   assertLayout(r.project);
   const p = r.project;
   assert.equal(p.name, 'led-circuit');
-  assert.deepEqual(p.components.map(c => `${c.ref}:${c.type}`).sort(), ['BT1:battery', 'D1:led', 'GND1:ground', 'R1:resistor', 'SW1:switch']);
+  assert.deepEqual(p.components.map(c => `${c.ref}:${c.type}`).sort(), ['BT1:battery', 'D1:led', 'GND1:ground', 'GND2:ground', 'R1:resistor', 'SW1:switch']);
   assert.equal(byRef(p, 'BT1').value, 9);
   assert.equal(byRef(p, 'R1').value, 330);
+  // Series parts along the top rail, the LED hanging down to its own ground.
+  for (const ref of ['SW1', 'R1']) assert.ok([0, 180].includes(byRef(p, ref).schematic.rotation), `${ref} is horizontal`);
+  assert.ok([90, 270].includes(byRef(p, 'D1').schematic.rotation));
+  assertGroundClusters(p);
   // Device:LED pin 1 is K and pin 2 is A; the registry wants anode first.
   assert.deepEqual(netlist(p), nets(['BT1.0 SW1.1', 'R1.0 SW1.0', 'D1.0 R1.1', 'BT1.1 D1.1 GND']));
 });
@@ -425,4 +476,53 @@ test('KiCad labels join separate wire islands by name', () => {
     .replace('\t(symbol\n\t\t(lib_id "Device:Battery")', '\t(global_label "LED_A" (shape input) (at 143.51 76.2 180) (effects (font (size 1.27 1.27))))\n\t(label "LED_A" (at 143.51 76.2 0) (effects (font (size 1.27 1.27))))\n\t(symbol\n\t\t(lib_id "Device:Battery")');
   const r = importDiagram('labels.kicad_sch', text);
   assert.deepEqual(netlist(r.project), nets(['BT1.0 SW1.1', 'R1.0 SW1.0', 'D1.0 R1.1', 'BT1.1 D1.1 GND']));
+});
+
+test('ground nets with several ground symbols are wired as one tree per nearest symbol', () => {
+  // Three ground symbols on one GND net; four pins near two of them; the third is spare.
+  const parts = [
+    { ref: 'V1', type: 'supply', value: 5, pins: [{ net: 'a', x: 0, y: 0 }, { net: 'GND', x: 0, y: 80 }] },
+    { ref: 'R1', type: 'resistor', value: 100, pins: [{ net: 'a', x: 200, y: 0 }, { net: 'GND', x: 200, y: 80 }] },
+    { ref: 'R2', type: 'resistor', value: 100, pins: [{ net: 'a', x: 400, y: 0 }, { net: 'GND', x: 400, y: 80 }] },
+    { ref: 'R3', type: 'resistor', value: 100, pins: [{ net: 'a', x: 480, y: 0 }, { net: 'GND', x: 480, y: 80 }] },
+    { type: 'ground', pins: [{ net: 'GND', x: 0, y: 120 }] },
+    { type: 'ground', pins: [{ net: 'GND', x: 440, y: 120 }] },
+    { type: 'ground', pins: [{ net: 'GND', x: 1200, y: 600 }] },
+  ];
+  const { project } = buildProject({ name: 'Grounds', parts });
+  assertLayout(project);
+  assertGroundClusters(project);
+  const grounds = project.components.filter(c => c.type === 'ground');
+  assert.equal(grounds.length, 2, 'the spare ground symbol with no nearby pins is dropped');
+  // Each pin is wired (only) to its nearest ground symbol.
+  const groupOf = key => wiredGroups(project).find(g => g.includes(key));
+  const left = groupOf('v1:1'), right = groupOf('r2:1');
+  assert.ok(left.includes('r1:1') && left.some(k => k.startsWith('gnd')));
+  assert.ok(right.includes('r3:1') && right.some(k => k.startsWith('gnd')));
+  assert.notDeepEqual(left, right);
+  // Electrically nothing changes: with grounds joined, it's still one ground net.
+  assert.deepEqual(netlist(project), nets(['R1.0 R2.0 R3.0 V1.0', 'GND R1.1 R2.1 R3.1 V1.1']));
+  // Ground wires: 4 pins → 4 wires (one per pin, none between symbols).
+  assert.equal(project.wires.filter(w => w.color === '#424b43').length, 4);
+});
+
+test('a ground net with a single ground symbol is still one tree', () => {
+  const r = importDiagram('led-circuit.kicad_sch', fixture('led-circuit.kicad_sch'));
+  const groundWires = r.project.wires.filter(w => w.color === '#424b43');
+  assert.equal(groundWires.length, 2);
+  const group = wiredGroups(r.project).find(g => g.includes('gnd1:0'));
+  assert.deepEqual(group.sort(), ['bt1:1', 'd1:1', 'gnd1:0']);
+});
+
+test('symbol-less ground nets get a ground per cluster of pins', () => {
+  const r = importDiagram('ladder.cir', 'Two loads\nV1 a 0 9\nR1 a b 1k\nR2 b 0 1k\nR3 b c 1k\nR4 c 0 1k\n.op\n.end\n');
+  assertLayout(r.project);
+  assertGroundClusters(r.project);
+  const grounds = r.project.components.filter(c => c.type === 'ground');
+  assert.equal(grounds.length, 3, 'under V1, R2 and R4');
+  for (const ref of ['V1', 'R2', 'R4']) {
+    const c = byRef(r.project, ref);
+    const low = [0, 1].map(i => pinPosition(c, i, 'schematic')).sort((a, b) => b.y - a.y)[0];
+    assert.ok(grounds.some(g => pinPosition(g, 0, 'schematic').x === low.x && pinPosition(g, 0, 'schematic').y > low.y), `a ground under ${ref}`);
+  }
 });
