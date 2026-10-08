@@ -107,3 +107,115 @@ test('wire voltages retain their sign on the negative side of a source', () => {
   near(r.wireVoltages['b2:1-r:0'], -3 * 100 / 101);
   near(r.wireCurrents['b2:1-r:0'], -3 / 101);
 });
+
+const part = (id, type, value, extra = {}) => ({ id, type, value, ...extra });
+
+test('a diode conducts forward with its drop and blocks in reverse', () => {
+  const parts = [battery, part('d', 'diode', 0.7), resistor('r', 100)];
+  const on = simulate(parts, [wire('b:0', 'd:0'), wire('d:1', 'r:0'), wire('r:1', 'b:1')]);
+  near(on.current, (9 - 0.7) / 101.5);
+  near(on.readings.d.voltage, 0.7 + on.current * 0.5);
+  const off = simulate(parts, [wire('b:0', 'd:1'), wire('d:0', 'r:0'), wire('r:1', 'b:1')]);
+  assert.equal(off.closed, false);
+});
+
+test('a reverse-biased zener regulates its breakdown voltage', () => {
+  const parts = [battery, resistor('r', 1000), part('z', 'zener', 5.1)];
+  const r = simulate(parts, [wire('b:0', 'r:0'), wire('r:1', 'z:1'), wire('z:0', 'b:1')]);
+  const vz = -r.readings.z.voltage;
+  assert.ok(vz > 5.1 && vz < 5.12, `zener voltage ${vz}`);
+  near(r.current, (9 - vz) / 1001, 1e-6);
+});
+
+test('an NPN transistor switches an LED from a small base current', () => {
+  const parts = [battery, resistor('rb', 10000), resistor('rc', 330), part('led', 'led', 2), part('q', 'npn', 100), part('s', 'switch', 1)];
+  const wires = [wire('b:0', 's:0'), wire('s:1', 'rb:0'), wire('rb:1', 'q:1'), wire('b:0', 'rc:0'), wire('rc:1', 'led:0'), wire('led:1', 'q:0'), wire('q:2', 'b:1')];
+  const on = simulate(parts, wires);
+  assert.equal(on.readings.q.state, 'saturation');
+  near(on.readings.q.baseCurrent, (9 - 0.7) / 10001, 1e-5);
+  assert.ok(on.readings.led.active);
+  assert.ok(on.readings.led.current > 0.015 && on.readings.led.current < 0.025);
+  for (const id of ['q', 'led', 'rb']) near(pinCurrentSum(on, id), 0, 1e-9);
+  parts[5] = part('s', 'switch', 0);
+  const off = simulate(parts, wires);
+  assert.equal(off.readings.q.state, 'cutoff');
+  assert.equal(off.readings.led.active, false);
+});
+
+test('an NPN in the active region multiplies base current by its gain', () => {
+  const parts = [battery, resistor('rb', 1e6), resistor('rc', 100), part('q', 'npn', 150)];
+  const r = simulate(parts, [wire('b:0', 'rb:0'), wire('rb:1', 'q:1'), wire('b:0', 'rc:0'), wire('rc:1', 'q:0'), wire('q:2', 'b:1')]);
+  assert.equal(r.readings.q.state, 'active');
+  near(r.readings.q.current, 150 * r.readings.q.baseCurrent, 1e-9);
+});
+
+test('a PNP transistor conducts when its base is pulled low', () => {
+  const parts = [battery, resistor('rb', 10000), resistor('rc', 330), part('q', 'pnp', 100)];
+  const r = simulate(parts, [wire('b:0', 'q:2'), wire('q:1', 'rb:0'), wire('rb:1', 'b:1'), wire('q:0', 'rc:0'), wire('rc:1', 'b:1')]);
+  assert.equal(r.readings.q.state, 'saturation');
+  assert.ok(r.readings.rc.current > 0.02);
+  near(pinCurrentSum(r, 'q'), 0, 1e-9);
+});
+
+test('a potentiometer divides voltage at its wiper', () => {
+  const parts = [battery, part('p', 'potentiometer', 10000, { position: 25 }), part('vm', 'voltmeter', 0)];
+  const r = simulate(parts, [wire('b:0', 'p:0'), wire('p:1', 'b:1'), wire('p:2', 'vm:0'), wire('vm:1', 'b:1')]);
+  const supply = 9 - r.current;
+  near(r.readings.vm.voltage, supply * 0.75, 5e-3);
+});
+
+test('a toggle switch routes current to the selected throw', () => {
+  const parts = [battery, part('t', 'spdt', 0), resistor('ra', 100), resistor('rb', 200)];
+  const wires = [wire('b:0', 't:0'), wire('t:1', 'ra:0'), wire('t:2', 'rb:0'), wire('ra:1', 'b:1'), wire('rb:1', 'b:1')];
+  assert.ok(simulate(parts, wires).readings.ra.active);
+  assert.equal(simulate(parts, wires).readings.rb.active, false);
+  parts[1] = part('t', 'spdt', 1);
+  assert.equal(simulate(parts, wires).readings.ra.active, false);
+  assert.ok(simulate(parts, wires).readings.rb.active);
+});
+
+test('a fuse blows when its rating is exceeded and stays intact otherwise', () => {
+  const parts = [battery, part('f', 'fuse', 0.5), resistor('r', 10)];
+  const wires = [wire('b:0', 'f:0'), wire('f:1', 'r:0'), wire('r:1', 'b:1')];
+  const blown = simulate(parts, wires);
+  assert.equal(blown.closed, false);
+  assert.ok(blown.warnings.some(w => w.includes('blew')));
+  parts[2] = resistor('r', 100);
+  assert.ok(simulate(parts, wires).closed);
+});
+
+test('ground parts share one reference node and report their return currents', () => {
+  const parts = [battery, resistor('r', 100), part('g1', 'ground', 0), part('g2', 'ground', 0)];
+  const r = simulate(parts, [wire('b:0', 'r:0'), wire('r:1', 'g1:0'), wire('b:1', 'g2:0')]);
+  assert.equal(r.voltageReference, 'g1:0');
+  near(r.current, 9 / 101);
+  near(r.pinVoltages['b:1'], 0);
+  near(r.pinVoltages['b:0'], 9 - r.current);
+  near(r.pinCurrents['g1:0'], r.current);
+  near(r.pinCurrents['g2:0'], -r.current);
+});
+
+test('meters read current in series and voltage in parallel', () => {
+  const parts = [battery, part('am', 'ammeter', 0), resistor('r', 100), part('vm', 'voltmeter', 0)];
+  const r = simulate(parts, [wire('b:0', 'am:0'), wire('am:1', 'r:0'), wire('r:1', 'b:1'), wire('vm:0', 'r:0'), wire('vm:1', 'r:1')]);
+  near(r.readings.am.current, 9 / 101.01, 1e-5);
+  near(r.readings.vm.voltage, r.readings.am.current * 100, 1e-4);
+});
+
+test('light and temperature change sensor resistance', () => {
+  const at = (type, value) => simulate([battery, part('s', type, value)], [wire('b:0', 's:0'), wire('s:1', 'b:1')]).current;
+  assert.ok(at('ldr', 100) > at('ldr', 0) * 100);
+  near(9 / at('thermistor', 25) - 1, 10000, 0.1);
+  assert.ok(at('thermistor', 80) > at('thermistor', 25) * 5);
+});
+
+test('pin currents satisfy KCL at every wire network node', () => {
+  const p = initialProject(), r = simulate(p.components, p.wires);
+  near(r.pinCurrents['bat1:0'], -r.current);
+  near(r.pinCurrents['r1:0'], r.current);
+  near(r.pinCurrents['led1:1'], -r.current);
+});
+
+function pinCurrentSum(result, id) {
+  return Object.entries(result.pinCurrents).filter(([pin]) => pin.startsWith(`${id}:`)).reduce((sum, [, current]) => sum + current, 0);
+}

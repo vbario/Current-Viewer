@@ -22,7 +22,7 @@ test('runs the starter circuit, updates electrical values, and toggles effects',
   await page.getByRole('switch', { name: 'Show current flow' }).click();
   await page.getByRole('switch', { name: 'Show heat view' }).click();
   await expect(page.locator('.heat-haze')).not.toHaveCount(0);
-  await page.getByRole('button', { name: '1k Ω', exact: true }).click();
+  await page.getByRole('button', { name: '1 kΩ', exact: true }).click();
   await expect(page.locator('.reading-card').nth(1)).toContainText('6.9');
   await expect(page.locator('[data-wire-readout="w3"] .wire-current')).toHaveText('6.92 mA');
   await expect(page.locator('[data-wire-readout="w3"] .wire-voltage')).toHaveText('2.07 V');
@@ -102,7 +102,7 @@ test('saves, exports, imports, restores, and opens starter projects', async ({ p
   await page.locator('input[type="file"]').setInputFiles(path);
   await expect(page.locator('.component-total')).toContainText('5 components');
   await expect(page.locator('.name-button')).toContainText('My LED experiment');
-  await page.getByRole('button', { name: 'Explore starter circuits', exact: true }).click();
+  await page.getByRole('button', { name: 'Starter circuits', exact: true }).click();
   await page.getByRole('button', { name: /Make it move/ }).click();
   await page.getByRole('button', { name: 'Run simulation' }).click();
   await expect(page.locator('.motor-spin')).toHaveCount(1);

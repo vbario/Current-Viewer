@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { wirePoints } from './wireGeometry.js';
+import { partBox } from './parts.js';
 
 export function formatWireVoltage(value) {
   return Number.isFinite(value) ? `${(Math.abs(value) < .005 ? 0 : value).toFixed(2)} V` : '— V';
@@ -15,18 +16,8 @@ function overlap(a, b) {
   return Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
 }
 
-function partBounds(c) {
-  const halfWidth = c.type === 'battery' ? 65 : 68;
-  const top = c.type === 'battery' ? -87 : c.type === 'resistor' ? -28 : -58;
-  const bottom = c.type === 'battery' ? 94 : c.type === 'resistor' ? 28 : 47;
-  const angle = (c.rotation || 0) * Math.PI / 180;
-  const points = [[-halfWidth, top], [halfWidth, top], [halfWidth, bottom], [-halfWidth, bottom]].map(([x, y]) => ({ x: c.x + x * Math.cos(angle) - y * Math.sin(angle), y: c.y + x * Math.sin(angle) + y * Math.cos(angle) }));
-  const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y));
-  return { x, y, w: Math.max(...points.map(p => p.x)) - x, h: Math.max(...points.map(p => p.y)) - y };
-}
-
 function placeReadouts(wires, components, scale) {
-  const obstacles = components.filter(c => c.type !== 'breadboard').map(partBounds);
+  const obstacles = components.filter(c => c.type !== 'breadboard').map(c => partBox(c, 'model'));
   return wires.map(wire => {
     const points = wirePoints(wire, components);
     const segments = points.slice(1).map((b, i) => ({ a: points[i], b, length: Math.hypot(b.x - points[i].x, b.y - points[i].y) })).sort((a, b) => b.length - a.length).slice(0, 3);

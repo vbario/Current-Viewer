@@ -1,0 +1,15 @@
+Transistor LED switch
+* A 9 V supply lights the LED when Q1 is switched on through RB.
+V1 vcc 0 DC 9
+RB vcc base 10k            ; base resistor
+Q1 coll base 0 Q2N2222
+RC vcc led_a 330
+D1 led_a coll LED_RED
+
+.model Q2N2222 NPN(IS=1E-14 VAF=100 BF=200 IKF=0.3 XTB=1.5 BR=3
++ CJC=8E-12 CJE=25E-12 TR=100E-9 TF=400E-12 ITF=1 VTF=2 XTF=3
++ RB=10 RC=.3 RE=.2 Vceo=30 Icrating=800m mfg=NXP)
+.model LED_RED D(IS=93.2p RS=42m N=3.73 BV=4 IBV=10u CJO=2.97p VJ=.75 M=.333 TT=4.32u Iave=40m Vpk=4 mfg=Generic type=LED)
+
+.op
+.end
